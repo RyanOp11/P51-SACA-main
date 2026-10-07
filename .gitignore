@@ -1,0 +1,41 @@
+# --- Secrets ---
+.env
+.env.*
+*.key
+
+# --- Logs / debug ---
+*.log
+output.txt
+ammu_log.txt
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+venv/
+.venv/
+
+# --- Database ---
+*.db
+saca.db
+
+# --- Local scratch / dupes ---
+scratch_extractor.py
+scratch_*.py
+test_groq.py
+test_llm.py
+test_safety.py
+test_redteam.py
+Test llm extractor.py
+logistic_regression.app.py
+list_models.py
+llm_extractor.py
+
+# --- AI transcripts ---
+Claude outputs/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini

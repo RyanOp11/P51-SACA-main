@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pandas
+pytest
+httpx
+scikit-learn
+numpy
+joblib
+groq
+python-dotenv
+flask
