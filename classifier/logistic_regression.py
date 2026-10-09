@@ -95,7 +95,7 @@ class LogisticRegressionClassifier(BaseClassifier):
         proba = self.pipeline.predict_proba(X)[0]
 
         severity = self.label_encoder.inverse_transform([pred_encoded])[0]
-        confidence = float(np.max(proba))  # 0.0-1.0, as base.py's build_result() requires
+        confidence = round(float(np.max(proba)), 4)  # 0.0-1.0, as base.py's build_result() requires
         reason = f"Model predicted {severity} with {confidence * 100:.1f}% confidence"
 
         allowed = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
