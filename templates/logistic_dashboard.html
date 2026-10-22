@@ -209,7 +209,7 @@
 
         </p>
         {% if result.get('override_applied') %}
-<       div class="info redflag">
+        <div class="info redflag">
         <strong>Red flag detected: {{ result['red_flags']|join(', ') }}</strong>
         <p>
         The classifier alone predicted {{ result['model_severity'] }}, but these
@@ -284,6 +284,8 @@
     {% endif %}
 
 </div>
+
+<script src="/voice.js" data-target="symptom_text"></script>
 
 </body>
 

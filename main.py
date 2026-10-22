@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+﻿from fastapi import FastAPI
 from pydantic import BaseModel
 from classifier.pipeline import SACAPipeline
 from classifier.llm_extractor import extract_symptoms
@@ -14,11 +14,13 @@ from database import (
 from keywords import SYMPTOM_MAP, SYMPTOM_DESCRIPTIONS
 from fastapi.middleware.cors import CORSMiddleware
 from ammu_api import router as ammu_router
+from voice_api import router as voice_router
 from fastapi.responses import FileResponse
 
 
 app = FastAPI(title="SACA - Smart Adaptive Clinical Assistant")
 app.include_router(ammu_router)
+app.include_router(voice_router)  # POST /transcribe (voice input)
 
 
 # Classification pipeline for /classify: LLM symptom extraction -> Logistic
@@ -155,6 +157,12 @@ def get_keywords():
 def root():
     return {"message": "SACA API is running"}
 
+
 @app.get("/ammu")
 def ammu_page():
     return FileResponse("ammu.html")
+
+
+@app.get("/voice.js")
+def voice_js():
+    return FileResponse("voice_input.js", media_type="application/javascript")

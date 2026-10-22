@@ -1,0 +1,590 @@
+diff -ruN -x __pycache__ -x .pytest_cache -x '*.pyc' -x saca.db -x ammu_log.txt -x saca_lr_model.pkl -x retrain_model.py -x llm_extractor.py -x .gitignore curorig/P51-SACA-main-main/ammu.html cur/P51-SACA-main-main/ammu.html
+--- curorig/P51-SACA-main-main/ammu.html	2026-10-09 17:40:15.000000000 +0000
++++ cur/P51-SACA-main-main/ammu.html	2026-10-20 18:20:24.479553854 +0000
+@@ -204,6 +204,7 @@
+   }
+ });
+ </script>
++<script src="/voice.js" data-target="input" data-lang="sw"></script>
+ 
+ </body>
+ </html>
+\ No newline at end of file
+diff -ruN -x __pycache__ -x .pytest_cache -x '*.pyc' -x saca.db -x ammu_log.txt -x saca_lr_model.pkl -x retrain_model.py -x llm_extractor.py -x .gitignore curorig/P51-SACA-main-main/main.py cur/P51-SACA-main-main/main.py
+--- curorig/P51-SACA-main-main/main.py	2026-10-09 17:40:15.000000000 +0000
++++ cur/P51-SACA-main-main/main.py	2026-10-20 18:20:24.479209138 +0000
+@@ -14,11 +14,13 @@
+ from keywords import SYMPTOM_MAP, SYMPTOM_DESCRIPTIONS
+ from fastapi.middleware.cors import CORSMiddleware
+ from ammu_api import router as ammu_router
++from voice_api import router as voice_router
+ from fastapi.responses import FileResponse
+ 
+ 
+ app = FastAPI(title="SACA - Smart Adaptive Clinical Assistant")
+ app.include_router(ammu_router)
++app.include_router(voice_router)  # POST /transcribe (voice input)
+ 
+ 
+ # Classification pipeline for /classify: LLM symptom extraction -> Logistic
+@@ -157,4 +159,10 @@
+ 
+ @app.get("/ammu")
+ def ammu_page():
+-    return FileResponse("ammu.html")
+\ No newline at end of file
++    return FileResponse("ammu.html")
++
++
++@app.get("/voice.js")
++def voice_js():
++    # one-line mic button for any page: <script src="/voice.js" data-target="<textbox id>"></script>
++    return FileResponse("voice_input.js", media_type="application/javascript")
+diff -ruN -x __pycache__ -x .pytest_cache -x '*.pyc' -x saca.db -x ammu_log.txt -x saca_lr_model.pkl -x retrain_model.py -x llm_extractor.py -x .gitignore curorig/P51-SACA-main-main/requirements.txt cur/P51-SACA-main-main/requirements.txt
+--- curorig/P51-SACA-main-main/requirements.txt	2026-10-09 17:40:15.000000000 +0000
++++ cur/P51-SACA-main-main/requirements.txt	2026-10-20 18:20:24.479869806 +0000
+@@ -9,3 +9,4 @@
+ groq
+ python-dotenv
+ flask
++python-multipart
+diff -ruN -x __pycache__ -x .pytest_cache -x '*.pyc' -x saca.db -x ammu_log.txt -x saca_lr_model.pkl -x retrain_model.py -x llm_extractor.py -x .gitignore curorig/P51-SACA-main-main/tests/test_voice_api.py cur/P51-SACA-main-main/tests/test_voice_api.py
+--- curorig/P51-SACA-main-main/tests/test_voice_api.py	1970-01-01 00:00:00.000000000 +0000
++++ cur/P51-SACA-main-main/tests/test_voice_api.py	2026-10-21 06:05:39.214587190 +0000
+@@ -0,0 +1,104 @@
++"""
++Voice input: POST /transcribe. The speech-to-text service is always faked here --
++the real Groq API is never called.
++"""
++import pytest
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++import voice_api
++import voice_core
++
++AUDIO = b"\x1aE\xdf\xa3" + b"\x00" * 2000     # > MIN_AUDIO_BYTES; contents don't matter (STT is faked)
++
++
++@pytest.fixture
++def client():
++    app = FastAPI()
++    app.include_router(voice_api.router)
++    return TestClient(app)
++
++
++def post(client, data=AUDIO, ctype="audio/webm", language="auto", name="voice.webm"):
++    return client.post("/transcribe", files={"audio": (name, data, ctype)}, data={"language": language})
++
++
++def test_returns_transcript_and_passes_language_and_extension(client, monkeypatch):
++    seen = {}
++
++    def fake(audio, filename, language):
++        seen.update(filename=filename, language=language, size=len(audio))
++        return "nina homa na maumivu ya kichwa"
++
++    monkeypatch.setattr(voice_core, "transcribe_audio", fake)
++    r = post(client, language="sw")
++    assert r.status_code == 200 and r.json() == {"text": "nina homa na maumivu ya kichwa"}
++    assert seen == {"filename": "voice.webm", "language": "sw", "size": len(AUDIO)}
++
++
++def test_auto_language_sends_no_language_hint(client, monkeypatch):
++    seen = {}
++    monkeypatch.setattr(voice_core, "transcribe_audio", lambda a, f, language: seen.setdefault("lang", language) or "x")
++    post(client, language="auto")
++    assert seen["lang"] is None
++
++
++def test_codec_suffix_in_content_type_is_accepted(client, monkeypatch):
++    monkeypatch.setattr(voice_core, "transcribe_audio", lambda a, f, l: "ok")
++    assert post(client, ctype="audio/webm;codecs=opus").status_code == 200
++    assert post(client, ctype="audio/mp4", name="voice.mp4").status_code == 200
++
++
++def test_rejects_bad_language(client):
++    assert post(client, language="fr").status_code == 422
++
++
++def test_rejects_non_audio(client):
++    assert post(client, ctype="text/html", name="x.html").status_code == 415
++
++
++def test_rejects_empty_or_tiny_clip(client):
++    assert post(client, data=b"").status_code == 400
++    assert post(client, data=b"abc").status_code == 400
++
++
++def test_rejects_oversized_clip(client, monkeypatch):
++    monkeypatch.setattr(voice_core, "MAX_AUDIO_BYTES", 5000)
++    assert post(client, data=b"\x00" * 6000).status_code == 413
++
++
++def test_missing_file_is_422(client):
++    assert client.post("/transcribe", data={"language": "en"}).status_code == 422
++
++
++def test_stt_failure_gives_friendly_503_and_leaks_nothing(client, monkeypatch):
++    def boom(a, f, l):
++        raise TimeoutError("secret internal detail gsk_123")
++    monkeypatch.setattr(voice_core, "transcribe_audio", boom)
++    r = post(client)
++    assert r.status_code == 503
++    assert "type your symptoms" in r.json()["detail"]
++    assert "gsk_123" not in r.text
++
++
++def test_works_without_api_key_until_used(client, monkeypatch):
++    # no key: the app must still import/start, and /transcribe fails politely
++    monkeypatch.delenv("GROQ_API_KEY", raising=False)
++    monkeypatch.setattr(voice_core, "_client", None)
++    assert post(client).status_code == 503
++
++
++def test_empty_transcript_returns_empty_text(client, monkeypatch):
++    monkeypatch.setattr(voice_core, "transcribe_audio", lambda a, f, l: "")
++    assert post(client).json() == {"text": ""}
++
++
++def test_main_app_serves_the_button_script_and_route():
++    import main
++    c = TestClient(main.app)
++    js = c.get("/voice.js")
++    assert js.status_code == 200 and "javascript" in js.headers["content-type"]
++    assert "/transcribe" in js.text
++    # /transcribe is registered on the real app: a tiny clip is a 400 ("no audio"), not a 404
++    r = c.post("/transcribe", files={"audio": ("v.webm", b"x", "audio/webm")}, data={"language": "en"})
++    assert r.status_code == 400
+diff -ruN -x __pycache__ -x .pytest_cache -x '*.pyc' -x saca.db -x ammu_log.txt -x saca_lr_model.pkl -x retrain_model.py -x llm_extractor.py -x .gitignore curorig/P51-SACA-main-main/tests/test_voice_flask.py cur/P51-SACA-main-main/tests/test_voice_flask.py
+--- curorig/P51-SACA-main-main/tests/test_voice_flask.py	1970-01-01 00:00:00.000000000 +0000
++++ cur/P51-SACA-main-main/tests/test_voice_flask.py	2026-10-21 06:05:39.222068127 +0000
+@@ -0,0 +1,84 @@
++"""
++Voice input on the Flask dashboard (voice_flask.py). The speech-to-text service is always faked.
++"""
++import io
++
++import pytest
++from flask import Flask
++
++import voice_core
++from voice_flask import voice_bp
++
++AUDIO = b"\x1aE\xdf\xa3" + b"\x00" * 2000
++
++
++@pytest.fixture
++def client():
++    app = Flask(__name__)
++    app.register_blueprint(voice_bp)
++    return app.test_client()
++
++
++def post(client, data=AUDIO, ctype="audio/webm", language="auto", name="voice.webm"):
++    return client.post("/transcribe", data={"audio": (io.BytesIO(data), name, ctype), "language": language},
++                       content_type="multipart/form-data")
++
++
++def test_returns_transcript_with_language_and_extension(client, monkeypatch):
++    seen = {}
++
++    def fake(audio, filename, language):
++        seen.update(filename=filename, language=language)
++        return "I have a high fever"
++
++    monkeypatch.setattr(voice_core, "transcribe_audio", fake)
++    r = post(client, language="en")
++    assert r.status_code == 200 and r.get_json() == {"text": "I have a high fever"}
++    assert seen == {"filename": "voice.webm", "language": "en"}
++
++
++def test_auto_language_sends_no_hint_and_codec_suffix_ok(client, monkeypatch):
++    seen = {}
++    monkeypatch.setattr(voice_core, "transcribe_audio", lambda a, f, language: seen.setdefault("l", language) or "x")
++    assert post(client, ctype="audio/webm;codecs=opus").status_code == 200
++    assert seen["l"] is None
++
++
++@pytest.mark.parametrize("kwargs,status", [
++    (dict(language="fr"), 422),
++    (dict(ctype="text/html", name="x.html"), 415),
++    (dict(data=b""), 400),
++    (dict(data=b"abc"), 400),
++])
++def test_rejections(client, kwargs, status):
++    assert post(client, **kwargs).status_code == status
++
++
++def test_oversized_clip_is_413(client, monkeypatch):
++    monkeypatch.setattr(voice_core, "MAX_AUDIO_BYTES", 5000)
++    assert post(client, data=b"\x00" * 6000).status_code == 413
++
++
++def test_missing_file_is_422(client):
++    assert client.post("/transcribe", data={"language": "en"}).status_code == 422
++
++
++def test_stt_failure_is_friendly_503_and_leaks_nothing(client, monkeypatch):
++    def boom(a, f, l):
++        raise TimeoutError("secret gsk_123")
++    monkeypatch.setattr(voice_core, "transcribe_audio", boom)
++    r = post(client)
++    assert r.status_code == 503 and "type your symptoms" in r.get_json()["detail"]
++    assert "gsk_123" not in r.get_data(as_text=True)
++
++
++def test_no_api_key_fails_politely(client, monkeypatch):
++    monkeypatch.delenv("GROQ_API_KEY", raising=False)
++    monkeypatch.setattr(voice_core, "_client", None)
++    assert post(client).status_code == 503
++
++
++def test_serves_the_button_script(client):
++    r = client.get("/voice.js")
++    assert r.status_code == 200 and "javascript" in r.content_type
++    assert b"/transcribe" in r.data
+diff -ruN -x __pycache__ -x .pytest_cache -x '*.pyc' -x saca.db -x ammu_log.txt -x saca_lr_model.pkl -x retrain_model.py -x llm_extractor.py -x .gitignore curorig/P51-SACA-main-main/voice_api.py cur/P51-SACA-main-main/voice_api.py
+--- curorig/P51-SACA-main-main/voice_api.py	1970-01-01 00:00:00.000000000 +0000
++++ cur/P51-SACA-main-main/voice_api.py	2026-10-21 06:05:39.141723373 +0000
+@@ -0,0 +1,19 @@
++# voice_api.py
++"""FastAPI wrapper for voice input: POST /transcribe. See voice_core.py for the logic and privacy notes."""
++
++from fastapi import APIRouter, File, Form, HTTPException, UploadFile
++from fastapi.concurrency import run_in_threadpool
++
++import voice_core
++
++router = APIRouter()
++
++
++@router.post("/transcribe")
++async def transcribe(audio: UploadFile = File(...), language: str = Form("auto")):
++    data = await audio.read(voice_core.MAX_AUDIO_BYTES + 1)
++    try:
++        text = await run_in_threadpool(voice_core.handle_audio, data, audio.content_type, audio.filename, language)
++    except voice_core.VoiceError as e:
++        raise HTTPException(status_code=e.status, detail=e.detail)
++    return {"text": text}
+diff -ruN -x __pycache__ -x .pytest_cache -x '*.pyc' -x saca.db -x ammu_log.txt -x saca_lr_model.pkl -x retrain_model.py -x llm_extractor.py -x .gitignore curorig/P51-SACA-main-main/voice_core.py cur/P51-SACA-main-main/voice_core.py
+--- curorig/P51-SACA-main-main/voice_core.py	1970-01-01 00:00:00.000000000 +0000
++++ cur/P51-SACA-main-main/voice_core.py	2026-10-21 06:05:39.138068129 +0000
+@@ -0,0 +1,111 @@
++# voice_core.py
++"""
++Voice input for SACA -- the part that does not depend on a web framework.
++
++Speech in, TEXT out. The two web layers (voice_flask.py for the Flask dashboard,
++voice_api.py for the FastAPI app) are thin wrappers around handle_audio().
++
++PRIVACY: the audio is health information. It is held in memory, sent to the
++speech-to-text service, and discarded. It is never written to disk or logged.
++With the default (hosted Whisper on Groq) the audio leaves the device -- say so in
++your privacy notes. To run fully offline later, replace transcribe_audio() with a
++local engine (e.g. faster-whisper); nothing else needs to change.
++
++The model defaults to whisper-large-v3, which Groq's docs recommend when accuracy
++and multilingual support matter. Override with the SACA_STT_MODEL environment variable.
++"""
++
++import logging
++import os
++import sys
++
++from dotenv import load_dotenv
++
++load_dotenv()
++
++log = logging.getLogger("saca.voice")
++
++MODEL = os.environ.get("SACA_STT_MODEL", "whisper-large-v3")
++TIMEOUT_SECONDS = 30.0
++MAX_AUDIO_BYTES = 5 * 1024 * 1024   # ~60 s of browser audio is well under 1 MB
++MIN_AUDIO_BYTES = 1000              # smaller than this is a click, not speech
++LANGUAGES = {"en": "en", "sw": "sw", "auto": None}   # Whisper's auto-detect is unreliable for Swahili
++
++# file extension Groq needs to recognise the format
++_EXT_BY_TYPE = {
++    "webm": "webm", "ogg": "ogg", "mp4": "mp4", "m4a": "m4a",
++    "wav": "wav", "x-wav": "wav", "wave": "wav", "mpeg": "mp3", "mp3": "mp3", "flac": "flac",
++}
++
++_client = None
++
++
++class VoiceError(Exception):
++    """A problem to report to the user: carries an HTTP status and a friendly message."""
++
++    def __init__(self, status: int, detail: str):
++        super().__init__(detail)
++        self.status = status
++        self.detail = detail
++
++
++def asset_path(relative_path: str) -> str:
++    """Path to a bundled file; works from source and inside a PyInstaller .exe."""
++    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
++        base = sys._MEIPASS
++    else:
++        base = os.path.dirname(os.path.abspath(__file__))
++    return os.path.join(base, relative_path)
++
++
++def _get_client():
++    """Created on first use, so the app still starts when GROQ_API_KEY is not set."""
++    global _client
++    if _client is None:
++        key = os.environ.get("GROQ_API_KEY")
++        if not key:
++            raise RuntimeError("GROQ_API_KEY is not set")
++        from groq import Groq
++        _client = Groq(api_key=key, timeout=TIMEOUT_SECONDS)
++    return _client
++
++
++def transcribe_audio(audio: bytes, filename: str, language) -> str:
++    """Audio bytes -> text. This is the one function to swap for an offline engine."""
++    kwargs = dict(file=(filename, audio), model=MODEL, response_format="text", temperature=0)
++    if language:
++        kwargs["language"] = language
++    resp = _get_client().audio.transcriptions.create(**kwargs)
++    text = resp if isinstance(resp, str) else getattr(resp, "text", "")
++    return (text or "").strip()
++
++
++def _extension(content_type, filename) -> str:
++    """Work out the file extension, or raise 415 if this is not audio we accept."""
++    ctype = (content_type or "").split(";")[0].strip().lower()
++    subtype = ctype.split("/")[-1]
++    if ctype.startswith("audio/") or ctype in ("video/webm", "video/mp4", "application/ogg"):
++        if subtype in _EXT_BY_TYPE:
++            return _EXT_BY_TYPE[subtype]
++    name = (filename or "").lower()
++    ext = name.rsplit(".", 1)[-1] if "." in name else ""
++    if ext in set(_EXT_BY_TYPE.values()) and ctype in ("", "application/octet-stream"):
++        return ext
++    raise VoiceError(415, "Unsupported audio format.")
++
++
++def handle_audio(data: bytes, content_type, filename, language: str) -> str:
++    """Validate an uploaded clip and return its transcript. Raises VoiceError."""
++    if language not in LANGUAGES:
++        raise VoiceError(422, "language must be 'en', 'sw' or 'auto'.")
++    ext = _extension(content_type, filename)
++    if len(data) > MAX_AUDIO_BYTES:
++        raise VoiceError(413, "Recording is too long. Please keep it under a minute.")
++    if len(data) < MIN_AUDIO_BYTES:
++        raise VoiceError(400, "No audio was received. Please try again.")
++    try:
++        return transcribe_audio(data, f"voice.{ext}", LANGUAGES[language])
++    except Exception as e:
++        # Log the kind of failure only -- never the audio or any transcript.
++        log.warning("transcription failed: %s", type(e).__name__)
++        raise VoiceError(503, "Voice input is not available right now. Please type your symptoms instead.")
+diff -ruN -x __pycache__ -x .pytest_cache -x '*.pyc' -x saca.db -x ammu_log.txt -x saca_lr_model.pkl -x retrain_model.py -x llm_extractor.py -x .gitignore curorig/P51-SACA-main-main/voice_flask.py cur/P51-SACA-main-main/voice_flask.py
+--- curorig/P51-SACA-main-main/voice_flask.py	1970-01-01 00:00:00.000000000 +0000
++++ cur/P51-SACA-main-main/voice_flask.py	2026-10-21 06:05:39.143026375 +0000
+@@ -0,0 +1,37 @@
++# voice_flask.py
++"""
++Flask wrapper for voice input -- for the dashboard served by logistic_regression.app.py.
++
++Adds two routes to the Flask app:
++    POST /transcribe   audio clip + language  ->  {"text": "..."}
++    GET  /voice.js     the microphone-button script
++See voice_core.py for the logic and the privacy notes.
++
++Use in the Flask app (two lines):
++    from voice_flask import voice_bp
++    app.register_blueprint(voice_bp)
++"""
++
++from flask import Blueprint, jsonify, request, send_file
++
++import voice_core
++
++voice_bp = Blueprint("voice", __name__)
++
++
++@voice_bp.post("/transcribe")
++def transcribe():
++    clip = request.files.get("audio")
++    if clip is None:
++        return jsonify(detail="No audio file was sent."), 422
++    data = clip.stream.read(voice_core.MAX_AUDIO_BYTES + 1)
++    try:
++        text = voice_core.handle_audio(data, clip.content_type, clip.filename, request.form.get("language", "auto"))
++    except voice_core.VoiceError as e:
++        return jsonify(detail=e.detail), e.status
++    return jsonify(text=text)
++
++
++@voice_bp.get("/voice.js")
++def voice_js():
++    return send_file(voice_core.asset_path("voice_input.js"), mimetype="application/javascript")
+diff -ruN -x __pycache__ -x .pytest_cache -x '*.pyc' -x saca.db -x ammu_log.txt -x saca_lr_model.pkl -x retrain_model.py -x llm_extractor.py -x .gitignore curorig/P51-SACA-main-main/voice_input.js cur/P51-SACA-main-main/voice_input.js
+--- curorig/P51-SACA-main-main/voice_input.js	1970-01-01 00:00:00.000000000 +0000
++++ cur/P51-SACA-main-main/voice_input.js	2026-10-20 18:20:24.465311406 +0000
+@@ -0,0 +1,161 @@
++/*
++ * SACA voice input -- adds a microphone button + language picker next to a text box.
++ *
++ * Use (one line, after the page's own script):
++ *   <script src="/voice.js" data-target="input" data-lang="sw"></script>
++ *
++ *   data-target   id of the <input>/<textarea> to fill            (required)
++ *   data-api      base URL of the SACA API, if the page is served from a different
++ *                 server than the API, e.g. "http://localhost:8000"   (default: same server)
++ *   data-lang     starting language: "auto" | "en" | "sw"           (default: "auto")
++ *   data-max-seconds  longest recording                            (default: 60)
++ *
++ * Tap once to start, tap again to stop. The transcript is put in the text box for the
++ * person to CHECK AND CORRECT -- it is never submitted automatically.
++ * Browsers only allow the microphone on https:// pages or http://localhost.
++ */
++(function () {
++  var script = document.currentScript;
++  var cfg = {
++    target: script && script.dataset.target,
++    api: ((script && script.dataset.api) || "").replace(/\/$/, ""),
++    lang: (script && script.dataset.lang) || "auto",
++    maxSeconds: parseInt((script && script.dataset.maxSeconds) || "60", 10),
++  };
++  var MIN_MS = 700;
++
++  function init() {
++    var field = document.getElementById(cfg.target);
++    if (!field) { console.warn("SACA voice: no element with id '" + cfg.target + "'"); return; }
++
++    var supported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
++
++    // ---- controls ---------------------------------------------------------
++    var wrap = document.createElement("span");
++    wrap.className = "saca-voice";
++    wrap.style.cssText = "display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;margin:6px 0;";
++
++    var select = document.createElement("select");
++    select.setAttribute("aria-label", "Speaking language");
++    [["auto", "Auto"], ["en", "English"], ["sw", "Kiswahili"]].forEach(function (o) {
++      var opt = document.createElement("option");
++      opt.value = o[0]; opt.textContent = o[1];
++      if (o[0] === cfg.lang) opt.selected = true;
++      select.appendChild(opt);
++    });
++    select.style.cssText = "padding:6px;border-radius:6px;border:1px solid #ccc;font-size:14px;";
++
++    var btn = document.createElement("button");
++    btn.type = "button";               // never submit the surrounding form
++    btn.textContent = "\uD83C\uDFA4 Speak";
++    btn.setAttribute("aria-pressed", "false");
++    btn.style.cssText = "padding:8px 14px;border:none;border-radius:8px;background:#475569;color:#fff;font-size:14px;cursor:pointer;margin:0;";
++
++    var status = document.createElement("span");
++    status.setAttribute("role", "status");
++    status.setAttribute("aria-live", "polite");
++    status.style.cssText = "font-size:13px;color:#555;";
++
++    wrap.appendChild(select); wrap.appendChild(btn); wrap.appendChild(status);
++    field.insertAdjacentElement("afterend", wrap);
++
++    function say(msg, isError) { status.textContent = msg; status.style.color = isError ? "#b91c1c" : "#555"; }
++
++    if (!supported) {
++      btn.disabled = true;
++      say("Voice input needs a secure (https) page or localhost and a recent browser. Please type instead.", true);
++      return;
++    }
++
++    // ---- recording --------------------------------------------------------
++    var recorder = null, stream = null, chunks = [], startedAt = 0, timer = null;
++
++    function pickMime() {
++      var list = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
++      for (var i = 0; i < list.length; i++) {
++        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(list[i])) return list[i];
++      }
++      return "";
++    }
++    function extFor(mime) {
++      mime = mime || "";
++      return mime.indexOf("webm") > -1 ? "webm" : mime.indexOf("ogg") > -1 ? "ogg" : mime.indexOf("mp4") > -1 ? "mp4" : "webm";
++    }
++    function setRecording(on) {
++      btn.textContent = on ? "\u25A0 Stop" : "\uD83C\uDFA4 Speak";
++      btn.style.background = on ? "#dc2626" : "#475569";
++      btn.setAttribute("aria-pressed", on ? "true" : "false");
++      select.disabled = on;
++    }
++    function releaseMic() {
++      if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
++      if (timer) { clearTimeout(timer); timer = null; }
++    }
++
++    async function start() {
++      say("");
++      try {
++        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
++      } catch (e) {
++        say("Microphone blocked or not found. Allow microphone access, or type instead.", true);
++        return;
++      }
++      var mime = pickMime();
++      try {
++        recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
++      } catch (e) {
++        releaseMic(); say("This browser cannot record audio. Please type instead.", true); return;
++      }
++      chunks = [];
++      recorder.ondataavailable = function (ev) { if (ev.data && ev.data.size) chunks.push(ev.data); };
++      recorder.onstop = onStopped;
++      recorder.start();
++      startedAt = Date.now();
++      setRecording(true);
++      say("Listening\u2026 tap Stop when you finish.");
++      timer = setTimeout(stop, cfg.maxSeconds * 1000);
++    }
++
++    function stop() {
++      if (recorder && recorder.state !== "inactive") recorder.stop();
++    }
++
++    async function onStopped() {
++      var ms = Date.now() - startedAt;
++      var mime = recorder.mimeType || pickMime();
++      releaseMic();
++      setRecording(false);
++      if (ms < MIN_MS || !chunks.length) { say("That was too short. Tap Speak and try again.", true); return; }
++
++      var form = new FormData();
++      form.append("audio", new Blob(chunks, { type: mime || "audio/webm" }), "voice." + extFor(mime));
++      form.append("language", select.value);
++
++      btn.disabled = true;
++      say("Turning your voice into text\u2026");
++      try {
++        var res = await fetch(cfg.api + "/transcribe", { method: "POST", body: form });
++        var data = {};
++        try { data = await res.json(); } catch (e) {}
++        if (!res.ok) { say(data.detail || "Voice input failed. Please type instead.", true); return; }
++        var text = (data.text || "").trim();
++        if (!text) { say("I could not hear anything. Please try again, closer to the microphone.", true); return; }
++        field.value = field.value.trim() ? field.value.trim() + " " + text : text;
++        field.dispatchEvent(new Event("input", { bubbles: true }));
++        field.focus();
++        say("Please check the text above and fix any mistakes before you submit.");
++      } catch (e) {
++        say("Could not reach the server. Please type instead.", true);
++      } finally {
++        btn.disabled = false;
++      }
++    }
++
++    btn.addEventListener("click", function () {
++      if (recorder && recorder.state === "recording") stop(); else start();
++    });
++  }
++
++  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
++  else init();
++})();
